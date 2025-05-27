@@ -1,0 +1,27 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "pip install -r requirements.txt",
+    "watchPatterns": [
+      "**/*.py",
+      "requirements.txt",
+      "alembic/**/*"
+    ]
+  },
+  "deploy": {
+    "restartPolicyType": "ON_FAILURE",
+    "startCommand": "python startup.py",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 100
+  },
+  "variables": {
+    "APP_NAME": "Play Buni Platform",
+    "APP_VERSION": "1.0.0",
+    "ENVIRONMENT": "production",
+    "DEBUG": "false",
+    "HOST": "0.0.0.0",
+    "PORT": "$PORT",
+    "WORKERS": "4"
+  }
+} 
