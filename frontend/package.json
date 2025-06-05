@@ -1,0 +1,10 @@
+{
+  "name": "play-buni-frontend",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+  }
+}
