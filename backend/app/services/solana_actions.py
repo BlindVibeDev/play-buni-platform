@@ -25,6 +25,8 @@ from enum import Enum
 import hashlib
 import hmac
 
+from supabase import create_client, Client
+
 from solana.publickey import PublicKey
 from solana.transaction import Transaction
 from solana.system_program import transfer, TransferParams
@@ -146,6 +148,9 @@ class SolanaActionsService:
         self.treasury_wallet = settings.treasury_wallet_address
         self.platform_fee_bps = 100  # 1% fee (100 basis points)
         self.session: Optional[aiohttp.ClientSession] = None
+        self.supabase: Client = create_client(
+            settings.supabase_url, settings.supabase_service_role_key
+        )
 
         # Common token addresses
         self.token_addresses = {
@@ -285,6 +290,49 @@ class SolanaActionsService:
         """Generate Blink URL for sharing"""
         encoded_url = base64.urlsafe_b64encode(action_url.encode()).decode().rstrip("=")
         return f"https://dial.to/?action=solana-action:{encoded_url}"
+
+    async def generate_blink_image(self, prompt: str, blink_id: str) -> Optional[str]:
+        """Generate an image using OpenAI and store it in Supabase."""
+        if not settings.openai_api_key:
+            return None
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "dall-e-3",
+                "prompt": prompt,
+                "n": 1,
+                "size": "1024x1024",
+            }
+
+            async with self.session.post(
+                "https://api.openai.com/v1/images/generations",
+                headers=headers,
+                json=payload,
+            ) as resp:
+                if resp.status != 200:
+                    logger.error(f"OpenAI image generation failed: {resp.status}")
+                    return None
+                data = await resp.json()
+                image_url = data["data"][0]["url"]
+
+            async with self.session.get(image_url) as resp:
+                img_bytes = await resp.read()
+
+            file_path = f"{blink_id}.png"
+            self.supabase.storage.from_("blink-images").upload(
+                file_path, img_bytes, {"content-type": "image/png"}
+            )
+            public_url = self.supabase.storage.from_("blink-images").get_public_url(
+                file_path
+            )
+            return public_url
+        except Exception as e:
+            logger.error(f"Error generating Blink image: {e}")
+            return None
 
     async def create_swap_action(
         self,
@@ -594,7 +642,12 @@ class SolanaActionsService:
             logger.error(f"Error recording trade execution: {e}")
 
     async def save_blink_to_database(
-        self, signal_id: int, action_id: str, action_data: SolanaAction, blink_url: str
+        self,
+        signal_id: int,
+        action_id: str,
+        action_data: SolanaAction,
+        blink_url: str,
+        image_url: Optional[str] = None,
     ) -> Optional[int]:
         """Save generated Blink to database"""
         try:
@@ -605,6 +658,7 @@ class SolanaActionsService:
                     "title": action_data.title,
                     "description": action_data.description,
                     "icon_url": action_data.icon,
+                    "image_url": image_url,
                     "action_url": action_data.links["actions"][0]["href"],
                     "blink_url": blink_url,
                     "action_data": asdict(action_data),
@@ -614,9 +668,9 @@ class SolanaActionsService:
                 }
 
                 result = await db.execute(
-                    "INSERT INTO blinks (signal_id, blink_id, title, description, icon_url, "
+                    "INSERT INTO blinks (signal_id, blink_id, title, description, icon_url, image_url, "
                     "action_url, blink_url, action_data, status, created_at, expires_at) "
-                    "VALUES (%(signal_id)s, %(blink_id)s, %(title)s, %(description)s, %(icon_url)s, "
+                    "VALUES (%(signal_id)s, %(blink_id)s, %(title)s, %(description)s, %(icon_url)s, %(image_url)s, "
                     "%(action_url)s, %(blink_url)s, %(action_data)s, %(status)s, %(created_at)s, %(expires_at)s) "
                     "RETURNING id",
                     blink_data,
@@ -670,11 +724,14 @@ class SolanaActionsService:
             blink_url = service.generate_blink_url(action_url)
             action_id = action_url.split("/")[-2]
 
+            image_url = await service.generate_blink_image(action.title, action_id)
+
             return await service.save_blink_to_database(
                 signal_id=signal_id,
                 action_id=action_id,
                 action_data=action,
                 blink_url=blink_url,
+                image_url=image_url,
             )
 
     async def get_treasury_balance(self) -> Dict[str, float]:
