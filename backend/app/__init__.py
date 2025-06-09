@@ -1,1 +1,1 @@
-# Play Buni Platform - NFT-Gated AI Trading Signals Platform 
+"""Play Buni Platform core package."""

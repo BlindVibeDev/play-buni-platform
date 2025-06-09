@@ -219,6 +219,28 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - **Signal Feed**: http://localhost:8000/signals/feed
 - **Premium Dashboard**: http://localhost:8000/premium/dashboard
 
+### Developer Setup
+Use the following steps for a local developer environment:
+1. From the `backend` folder create and activate a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate
+   ```
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   If some packages fail to build in your environment, install the minimal
+   dependencies needed for the test suite:
+   ```bash
+   pip install fastapi pydantic pydantic-settings uvicorn structlog aiohttp sqlalchemy
+   ```
+3. Copy `env.example` to `.env` and update the values.
+4. Run the test suite to ensure everything works:
+   ```bash
+   pytest
+   ```
+
 ## 📊 Platform Features
 
 ### 🤖 AI Signal Agent
@@ -526,7 +548,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ### Phase 1: Core Platform (Q1 2025)
 - ✅ NFT-gated signal distribution
 - ✅ Solana Blinks integration
-- ✅ Social media automation
+- 🔄 Social media automation
 - 🔄 Premium dashboard development
 
 ### Phase 2: Advanced Features (Q2 2025)

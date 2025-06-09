@@ -25,6 +25,8 @@ from enum import Enum
 import hashlib
 import hmac
 
+from supabase import create_client, Client
+
 from solana.publickey import PublicKey
 from solana.transaction import Transaction
 from solana.system_program import transfer, TransferParams
@@ -44,6 +46,7 @@ logger = get_logger(__name__)
 
 class ActionType(Enum):
     """Types of Solana Actions"""
+
     SWAP = "swap"
     BUY = "buy"
     SELL = "sell"
@@ -52,6 +55,7 @@ class ActionType(Enum):
 
 class BlinkStatus(Enum):
     """Status of generated Blinks"""
+
     ACTIVE = "active"
     EXPIRED = "expired"
     DISABLED = "disabled"
@@ -61,6 +65,7 @@ class BlinkStatus(Enum):
 @dataclass
 class ActionMetadata:
     """Metadata for Solana Actions"""
+
     title: str
     description: str
     icon: str
@@ -72,6 +77,7 @@ class ActionMetadata:
 @dataclass
 class ActionParameter:
     """Parameter for Solana Actions"""
+
     name: str
     label: str
     required: bool = True
@@ -84,6 +90,7 @@ class ActionParameter:
 @dataclass
 class SolanaAction:
     """Complete Solana Action specification"""
+
     type: str
     title: str
     icon: str
@@ -97,6 +104,7 @@ class SolanaAction:
 @dataclass
 class SwapQuote:
     """Jupiter swap quote information"""
+
     input_mint: str
     output_mint: str
     in_amount: int
@@ -114,6 +122,7 @@ class SwapQuote:
 @dataclass
 class TradeExecution:
     """Trade execution result"""
+
     transaction_id: str
     status: str
     input_amount: float
@@ -129,17 +138,20 @@ class TradeExecution:
 class SolanaActionsService:
     """
     Solana Actions/Blinks Service
-    
+
     Generates executable Solana Actions with embedded fee collection
     and integrates with Jupiter API for optimal swap routing.
     """
-    
+
     def __init__(self):
         self.jupiter_api_url = "https://quote-api.jup.ag/v6"
         self.treasury_wallet = settings.treasury_wallet_address
         self.platform_fee_bps = 100  # 1% fee (100 basis points)
         self.session: Optional[aiohttp.ClientSession] = None
-        
+        self.supabase: Client = create_client(
+            settings.supabase_url, settings.supabase_service_role_key
+        )
+
         # Common token addresses
         self.token_addresses = {
             "SOL": "So11111111111111111111111111111111111111112",
@@ -148,20 +160,20 @@ class SolanaActionsService:
             "mSOL": "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
             "stSOL": "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj",
         }
-    
+
     async def __aenter__(self):
         """Async context manager entry"""
         self.session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
-            headers={"User-Agent": "PlayBuni/1.0"}
+            headers={"User-Agent": "PlayBuni/1.0"},
         )
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
         if self.session:
             await self.session.close()
-    
+
     def validate_wallet_address(self, address: str) -> bool:
         """Validate Solana wallet address"""
         try:
@@ -169,7 +181,7 @@ class SolanaActionsService:
             return True
         except Exception:
             return False
-    
+
     def validate_token_address(self, address: str) -> bool:
         """Validate Solana token mint address"""
         try:
@@ -177,21 +189,21 @@ class SolanaActionsService:
             return len(address) == 44  # Base58 encoded public key length
         except Exception:
             return False
-    
+
     async def get_jupiter_quote(
         self,
         input_mint: str,
         output_mint: str,
         amount: int,
         slippage_bps: int = 50,
-        user_wallet: Optional[str] = None
+        user_wallet: Optional[str] = None,
     ) -> Optional[SwapQuote]:
         """Get swap quote from Jupiter API"""
         try:
             if not self.session:
                 logger.error("HTTP session not initialized")
                 return None
-            
+
             params = {
                 "inputMint": input_mint,
                 "outputMint": output_mint,
@@ -199,21 +211,21 @@ class SolanaActionsService:
                 "slippageBps": str(slippage_bps),
                 "platformFeeBps": str(self.platform_fee_bps),
                 "maxAccounts": "64",
-                "swapMode": "ExactIn"
+                "swapMode": "ExactIn",
             }
-            
+
             if user_wallet:
                 params["userPublicKey"] = user_wallet
-            
+
             url = f"{self.jupiter_api_url}/quote"
-            
+
             async with self.session.get(url, params=params) as response:
                 if response.status != 200:
                     logger.error(f"Jupiter API error: {response.status}")
                     return None
-                
+
                 data = await response.json()
-                
+
                 return SwapQuote(
                     input_mint=data["inputMint"],
                     output_mint=data["outputMint"],
@@ -226,27 +238,24 @@ class SolanaActionsService:
                     price_impact_pct=float(data.get("priceImpactPct", 0)),
                     route_plan=data.get("routePlan", []),
                     context_slot=int(data.get("contextSlot", 0)),
-                    time_taken=float(data.get("timeTaken", 0))
+                    time_taken=float(data.get("timeTaken", 0)),
                 )
-                
+
         except Exception as e:
             logger.error(f"Error getting Jupiter quote: {e}")
             return None
-    
+
     async def get_jupiter_swap_transaction(
-        self,
-        quote: SwapQuote,
-        user_wallet: str,
-        priority_fee: int = 0
+        self, quote: SwapQuote, user_wallet: str, priority_fee: int = 0
     ) -> Optional[str]:
         """Get swap transaction from Jupiter API"""
         try:
             if not self.session:
                 logger.error("HTTP session not initialized")
                 return None
-            
+
             url = f"{self.jupiter_api_url}/swap"
-            
+
             payload = {
                 "quoteResponse": asdict(quote),
                 "userPublicKey": user_wallet,
@@ -258,70 +267,111 @@ class SolanaActionsService:
                 "useTokenLedger": False,
                 "destinationTokenAccount": None,
                 "dynamicComputeUnitLimit": True,
-                "skipUserAccountsRpcCalls": False
+                "skipUserAccountsRpcCalls": False,
             }
-            
+
             async with self.session.post(url, json=payload) as response:
                 if response.status != 200:
                     logger.error(f"Jupiter swap API error: {response.status}")
                     return None
-                
+
                 data = await response.json()
                 return data.get("swapTransaction")
-                
+
         except Exception as e:
             logger.error(f"Error getting Jupiter swap transaction: {e}")
             return None
-    
+
     def generate_action_url(self, action_id: str, base_url: str) -> str:
         """Generate Solana Action URL"""
         return f"{base_url}/api/v1/blinks/{action_id}"
-    
+
     def generate_blink_url(self, action_url: str) -> str:
         """Generate Blink URL for sharing"""
-        encoded_url = base64.urlsafe_b64encode(action_url.encode()).decode().rstrip('=')
+        encoded_url = base64.urlsafe_b64encode(action_url.encode()).decode().rstrip("=")
         return f"https://dial.to/?action=solana-action:{encoded_url}"
-    
+
+    async def generate_blink_image(self, prompt: str, blink_id: str) -> Optional[str]:
+        """Generate an image using OpenAI and store it in Supabase."""
+        if not settings.openai_api_key:
+            return None
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "dall-e-3",
+                "prompt": prompt,
+                "n": 1,
+                "size": "1024x1024",
+            }
+
+            async with self.session.post(
+                "https://api.openai.com/v1/images/generations",
+                headers=headers,
+                json=payload,
+            ) as resp:
+                if resp.status != 200:
+                    logger.error(f"OpenAI image generation failed: {resp.status}")
+                    return None
+                data = await resp.json()
+                image_url = data["data"][0]["url"]
+
+            async with self.session.get(image_url) as resp:
+                img_bytes = await resp.read()
+
+            file_path = f"{blink_id}.png"
+            self.supabase.storage.from_("blink-images").upload(
+                file_path, img_bytes, {"content-type": "image/png"}
+            )
+            public_url = self.supabase.storage.from_("blink-images").get_public_url(
+                file_path
+            )
+            return public_url
+        except Exception as e:
+            logger.error(f"Error generating Blink image: {e}")
+            return None
+
     async def create_swap_action(
         self,
         signal_id: int,
         input_token: str,
         output_token: str,
         suggested_amount: Optional[float] = None,
-        max_slippage: float = 1.0
+        max_slippage: float = 1.0,
     ) -> Optional[SolanaAction]:
         """Create a swap action from a trading signal"""
         try:
             # Get signal details
             async with get_db_session() as db:
-                result = await db.execute(
-                    select(Signal).where(Signal.id == signal_id)
-                )
+                result = await db.execute(select(Signal).where(Signal.id == signal_id))
                 signal = result.scalar_one_or_none()
-                
+
                 if not signal:
                     logger.error(f"Signal {signal_id} not found")
                     return None
-            
+
             # Validate token addresses
             input_mint = self.token_addresses.get(input_token, input_token)
             output_mint = signal.mint_address
-            
+
             if not self.validate_token_address(input_mint):
                 logger.error(f"Invalid input token: {input_token}")
                 return None
-            
+
             if not self.validate_token_address(output_mint):
                 logger.error(f"Invalid output token: {output_mint}")
                 return None
-            
+
             # Generate action metadata
             action_title = f"{signal.signal_type.upper()} {signal.symbol}"
             action_description = f"Execute {signal.signal_type} signal for {signal.symbol} with {signal.confidence_score:.0%} confidence"
-            
+
             if signal.reasoning:
                 action_description += f". {signal.reasoning[0]}"
-            
+
             # Create action parameters
             parameters = [
                 ActionParameter(
@@ -330,34 +380,38 @@ class SolanaActionsService:
                     required=True,
                     type="number",
                     min=0.001,
-                    max=1000000
+                    max=1000000,
                 )
             ]
-            
+
             if max_slippage > 0:
-                parameters.append(ActionParameter(
-                    name="slippage",
-                    label="Max Slippage (%)",
-                    required=False,
-                    type="number",
-                    min=0.1,
-                    max=10.0
-                ))
-            
+                parameters.append(
+                    ActionParameter(
+                        name="slippage",
+                        label="Max Slippage (%)",
+                        required=False,
+                        type="number",
+                        min=0.1,
+                        max=10.0,
+                    )
+                )
+
             # Generate action links
-            action_id = hashlib.md5(f"{signal_id}_{input_token}_{output_token}".encode()).hexdigest()
+            action_id = hashlib.md5(
+                f"{signal_id}_{input_token}_{output_token}".encode()
+            ).hexdigest()
             base_url = settings.base_url
-            
+
             links = {
                 "actions": [
                     {
                         "label": f"Swap {input_token} → {signal.symbol}",
                         "href": f"{base_url}/api/v1/blinks/{action_id}/execute",
-                        "parameters": [param.__dict__ for param in parameters]
+                        "parameters": [param.__dict__ for param in parameters],
                     }
                 ]
             }
-            
+
             # Create Solana Action
             action = SolanaAction(
                 type="action",
@@ -366,69 +420,77 @@ class SolanaActionsService:
                 description=action_description,
                 label=f"Trade {signal.symbol}",
                 links=links,
-                disabled=signal.expires_at < datetime.utcnow() if signal.expires_at else False
+                disabled=(
+                    signal.expires_at < datetime.utcnow()
+                    if signal.expires_at
+                    else False
+                ),
             )
-            
+
             return action
-            
+
         except Exception as e:
             logger.error(f"Error creating swap action: {e}")
             return None
-    
+
     async def create_buy_action(
         self,
         signal_id: int,
         base_currency: str = "USDC",
-        suggested_amounts: List[float] = None
+        suggested_amounts: List[float] = None,
     ) -> Optional[SolanaAction]:
         """Create a buy action with preset amounts"""
         try:
             if suggested_amounts is None:
                 suggested_amounts = [10, 25, 50, 100, 250]
-            
+
             # Get signal details
             async with get_db_session() as db:
-                result = await db.execute(
-                    select(Signal).where(Signal.id == signal_id)
-                )
+                result = await db.execute(select(Signal).where(Signal.id == signal_id))
                 signal = result.scalar_one_or_none()
-                
+
                 if not signal:
                     return None
-            
+
             # Generate action metadata
             action_title = f"Buy {signal.symbol}"
             action_description = f"Quick buy {signal.symbol} with preset amounts. Signal confidence: {signal.confidence_score:.0%}"
-            
+
             # Create action links for different amounts
-            action_id = hashlib.md5(f"buy_{signal_id}_{base_currency}".encode()).hexdigest()
+            action_id = hashlib.md5(
+                f"buy_{signal_id}_{base_currency}".encode()
+            ).hexdigest()
             base_url = settings.base_url
-            
+
             actions = []
             for amount in suggested_amounts:
-                actions.append({
-                    "label": f"Buy ${amount} {signal.symbol}",
-                    "href": f"{base_url}/api/v1/blinks/{action_id}/execute?amount={amount}&currency={base_currency}"
-                })
-            
-            # Add custom amount option
-            actions.append({
-                "label": "Custom Amount",
-                "href": f"{base_url}/api/v1/blinks/{action_id}/execute",
-                "parameters": [
+                actions.append(
                     {
-                        "name": "amount",
-                        "label": f"Amount ({base_currency})",
-                        "required": True,
-                        "type": "number",
-                        "min": 1,
-                        "max": 10000
+                        "label": f"Buy ${amount} {signal.symbol}",
+                        "href": f"{base_url}/api/v1/blinks/{action_id}/execute?amount={amount}&currency={base_currency}",
                     }
-                ]
-            })
-            
+                )
+
+            # Add custom amount option
+            actions.append(
+                {
+                    "label": "Custom Amount",
+                    "href": f"{base_url}/api/v1/blinks/{action_id}/execute",
+                    "parameters": [
+                        {
+                            "name": "amount",
+                            "label": f"Amount ({base_currency})",
+                            "required": True,
+                            "type": "number",
+                            "min": 1,
+                            "max": 10000,
+                        }
+                    ],
+                }
+            )
+
             links = {"actions": actions}
-            
+
             action = SolanaAction(
                 type="action",
                 title=action_title,
@@ -436,76 +498,78 @@ class SolanaActionsService:
                 description=action_description,
                 label=f"Buy {signal.symbol}",
                 links=links,
-                disabled=signal.expires_at < datetime.utcnow() if signal.expires_at else False
+                disabled=(
+                    signal.expires_at < datetime.utcnow()
+                    if signal.expires_at
+                    else False
+                ),
             )
-            
+
             return action
-            
+
         except Exception as e:
             logger.error(f"Error creating buy action: {e}")
             return None
-    
+
     async def execute_swap_action(
         self,
         action_id: str,
         user_wallet: str,
         amount: float,
         slippage: float = 0.5,
-        priority_fee: int = 0
+        priority_fee: int = 0,
     ) -> Optional[str]:
         """Execute a swap action and return transaction"""
         try:
             # Validate inputs
             if not self.validate_wallet_address(user_wallet):
                 raise ValueError("Invalid wallet address")
-            
+
             if amount <= 0:
                 raise ValueError("Amount must be positive")
-            
+
             if not (0.1 <= slippage <= 10.0):
                 raise ValueError("Slippage must be between 0.1% and 10%")
-            
+
             # Get action details from cache or database
             cache_key = f"action:{action_id}"
             action_data = await cache_manager.get_json(cache_key)
-            
+
             if not action_data:
                 logger.error(f"Action {action_id} not found")
                 return None
-            
+
             input_mint = action_data["input_mint"]
             output_mint = action_data["output_mint"]
             signal_id = action_data.get("signal_id")
-            
+
             # Convert amount to lamports/smallest unit
             # Assuming input token has 6 decimals (USDC standard)
             amount_lamports = int(amount * 1_000_000)
             slippage_bps = int(slippage * 100)
-            
+
             # Get Jupiter quote
             quote = await self.get_jupiter_quote(
                 input_mint=input_mint,
                 output_mint=output_mint,
                 amount=amount_lamports,
                 slippage_bps=slippage_bps,
-                user_wallet=user_wallet
+                user_wallet=user_wallet,
             )
-            
+
             if not quote:
                 logger.error("Failed to get Jupiter quote")
                 return None
-            
+
             # Get swap transaction
             swap_transaction = await self.get_jupiter_swap_transaction(
-                quote=quote,
-                user_wallet=user_wallet,
-                priority_fee=priority_fee
+                quote=quote, user_wallet=user_wallet, priority_fee=priority_fee
             )
-            
+
             if not swap_transaction:
                 logger.error("Failed to get swap transaction")
                 return None
-            
+
             # Store trade record
             await self.record_trade_execution(
                 user_wallet=user_wallet,
@@ -513,15 +577,15 @@ class SolanaActionsService:
                 action_id=action_id,
                 input_amount=amount,
                 quote=quote,
-                transaction_data=swap_transaction
+                transaction_data=swap_transaction,
             )
-            
+
             return swap_transaction
-            
+
         except Exception as e:
             logger.error(f"Error executing swap action: {e}")
             return None
-    
+
     async def record_trade_execution(
         self,
         user_wallet: str,
@@ -529,7 +593,7 @@ class SolanaActionsService:
         action_id: str,
         input_amount: float,
         quote: SwapQuote,
-        transaction_data: str
+        transaction_data: str,
     ):
         """Record trade execution in database"""
         try:
@@ -537,7 +601,7 @@ class SolanaActionsService:
                 # Calculate fee amount
                 fee_amount = input_amount * (self.platform_fee_bps / 10000)
                 output_amount = quote.out_amount / 1_000_000  # Convert from lamports
-                
+
                 trade_data = {
                     "user_wallet": user_wallet,
                     "signal_id": signal_id,
@@ -553,9 +617,9 @@ class SolanaActionsService:
                     "price_impact": quote.price_impact_pct,
                     "status": "pending",
                     "transaction_data": transaction_data,
-                    "created_at": datetime.utcnow()
+                    "created_at": datetime.utcnow(),
                 }
-                
+
                 result = await db.execute(
                     "INSERT INTO trades (user_wallet, signal_id, blink_id, transaction_type, "
                     "input_token, output_token, input_amount, output_amount, fee_amount, "
@@ -564,23 +628,26 @@ class SolanaActionsService:
                     "%(input_token)s, %(output_token)s, %(input_amount)s, %(output_amount)s, "
                     "%(fee_amount)s, %(fee_percentage)s, %(slippage_bps)s, %(price_impact)s, "
                     "%(status)s, %(transaction_data)s, %(created_at)s) RETURNING id",
-                    trade_data
+                    trade_data,
                 )
-                
+
                 trade_id = result.fetchone()[0]
                 await db.commit()
-                
-                logger.info(f"Recorded trade execution {trade_id} for user {user_wallet}")
-                
+
+                logger.info(
+                    f"Recorded trade execution {trade_id} for user {user_wallet}"
+                )
+
         except Exception as e:
             logger.error(f"Error recording trade execution: {e}")
-    
+
     async def save_blink_to_database(
         self,
         signal_id: int,
         action_id: str,
         action_data: SolanaAction,
-        blink_url: str
+        blink_url: str,
+        image_url: Optional[str] = None,
     ) -> Optional[int]:
         """Save generated Blink to database"""
         try:
@@ -591,33 +658,82 @@ class SolanaActionsService:
                     "title": action_data.title,
                     "description": action_data.description,
                     "icon_url": action_data.icon,
+                    "image_url": image_url,
                     "action_url": action_data.links["actions"][0]["href"],
                     "blink_url": blink_url,
                     "action_data": asdict(action_data),
                     "status": BlinkStatus.ACTIVE.value,
                     "created_at": datetime.utcnow(),
-                    "expires_at": datetime.utcnow() + timedelta(hours=24)
+                    "expires_at": datetime.utcnow() + timedelta(hours=24),
                 }
-                
+
                 result = await db.execute(
-                    "INSERT INTO blinks (signal_id, blink_id, title, description, icon_url, "
+                    "INSERT INTO blinks (signal_id, blink_id, title, description, icon_url, image_url, "
                     "action_url, blink_url, action_data, status, created_at, expires_at) "
-                    "VALUES (%(signal_id)s, %(blink_id)s, %(title)s, %(description)s, %(icon_url)s, "
+                    "VALUES (%(signal_id)s, %(blink_id)s, %(title)s, %(description)s, %(icon_url)s, %(image_url)s, "
                     "%(action_url)s, %(blink_url)s, %(action_data)s, %(status)s, %(created_at)s, %(expires_at)s) "
                     "RETURNING id",
-                    blink_data
+                    blink_data,
                 )
-                
+
                 blink_id = result.fetchone()[0]
                 await db.commit()
-                
+
                 logger.info(f"Saved Blink {blink_id} for signal {signal_id}")
                 return blink_id
-                
+
         except Exception as e:
             logger.error(f"Error saving Blink to database: {e}")
             return None
-    
+
+    async def generate_and_store_blink(
+        self,
+        signal_id: int,
+        action_type: str = "swap",
+        input_token: str = "USDC",
+        suggested_amounts: Optional[List[float]] = None,
+        max_slippage: float = 1.0,
+    ) -> Optional[int]:
+        """Generate a Blink and store it in the database.
+
+        This helper creates the appropriate Solana action and persists the
+        resulting Blink record without returning the action metadata.
+        """
+
+        async with self as service:
+            if action_type.lower() == "buy":
+                action = await service.create_buy_action(
+                    signal_id=signal_id,
+                    base_currency=input_token,
+                    suggested_amounts=suggested_amounts,
+                )
+            else:
+                # The swap action internally determines the output token from
+                # the signal metadata, so we only need to provide a placeholder
+                action = await service.create_swap_action(
+                    signal_id=signal_id,
+                    input_token=input_token,
+                    output_token="placeholder",
+                    max_slippage=max_slippage,
+                )
+
+            if not action:
+                return None
+
+            action_url = action.links["actions"][0]["href"]
+            blink_url = service.generate_blink_url(action_url)
+            action_id = action_url.split("/")[-2]
+
+            image_url = await service.generate_blink_image(action.title, action_id)
+
+            return await service.save_blink_to_database(
+                signal_id=signal_id,
+                action_id=action_id,
+                action_data=action,
+                blink_url=blink_url,
+                image_url=image_url,
+            )
+
     async def get_treasury_balance(self) -> Dict[str, float]:
         """Get current treasury balance"""
         try:
@@ -627,38 +743,38 @@ class SolanaActionsService:
                 "SOL": 0.0,
                 "USDC": 0.0,
                 "total_fees_collected": 0.0,
-                "last_updated": datetime.utcnow().isoformat()
+                "last_updated": datetime.utcnow().isoformat(),
             }
-            
+
         except Exception as e:
             logger.error(f"Error getting treasury balance: {e}")
             return {}
-    
+
     async def generate_action_signature(self, action_data: Dict[str, Any]) -> str:
         """Generate HMAC signature for action verification"""
         try:
             message = json.dumps(action_data, sort_keys=True)
             signature = hmac.new(
-                settings.secret_key.encode(),
-                message.encode(),
-                hashlib.sha256
+                settings.secret_key.encode(), message.encode(), hashlib.sha256
             ).hexdigest()
             return signature
-            
+
         except Exception as e:
             logger.error(f"Error generating action signature: {e}")
             return ""
-    
-    async def verify_action_signature(self, action_data: Dict[str, Any], signature: str) -> bool:
+
+    async def verify_action_signature(
+        self, action_data: Dict[str, Any], signature: str
+    ) -> bool:
         """Verify action signature"""
         try:
             expected_signature = await self.generate_action_signature(action_data)
             return hmac.compare_digest(expected_signature, signature)
-            
+
         except Exception as e:
             logger.error(f"Error verifying action signature: {e}")
             return False
 
 
 # Global Solana Actions service instance
-solana_actions_service = SolanaActionsService() 
+solana_actions_service = SolanaActionsService()
