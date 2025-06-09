@@ -5,10 +5,9 @@ Background tasks for market data collection, price tracking, and market analysis
 
 import asyncio
 import logging
-from typing import Dict, List, Any, Optional
-from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Any
+from datetime import datetime, timezone
 from celery import shared_task
-from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
 from app.workers.celery_app import celery_app
@@ -122,7 +121,7 @@ async def _process_market_movements_async(movements: List[Dict[str, Any]]):
             price = movement.get("price", 0)
 
             # Generate signal for significant movement
-            signal_task = generate_movement_signal.delay(
+            generate_movement_signal.delay(
                 token=token,
                 price=price,
                 change_24h=change_24h,
@@ -252,7 +251,7 @@ async def _analyze_market_trends_async():
             extra={
                 "market_sentiment": market_sentiment,
                 "top_gainers": [g["symbol"] for g in top_gainers],
-                "top_losers": [l["symbol"] for l in top_losers],
+                "top_losers": [loser["symbol"] for loser in top_losers],
                 "total_market_cap": trends.get("total_market_cap", 0),
                 "total_volume_24h": trends.get("total_volume_24h", 0),
             },
@@ -312,14 +311,14 @@ async def _monitor_whale_activity_async() -> Dict[str, Any]:
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
-                    "method": "getConfirmedSignaturesForAddress2",
+                    "method": "getSignaturesForAddress",
                     "params": [settings.treasury_wallet, {"limit": 50}],
                 },
             )
             resp.raise_for_status()
             signatures = resp.json().get("result", [])
 
-            for sig in signatures:
+            async def fetch_transaction(sig: Dict[str, Any]):
                 tx_resp = await client.post(
                     settings.solana_rpc_url,
                     json={
@@ -330,17 +329,37 @@ async def _monitor_whale_activity_async() -> Dict[str, Any]:
                     },
                 )
                 tx_resp.raise_for_status()
-                tx = tx_resp.json().get("result")
-                if not tx:
+                return tx_resp.json().get("result")
+
+            tx_results = await asyncio.gather(
+                *[fetch_transaction(sig) for sig in signatures],
+                return_exceptions=True,
+            )
+
+            for sig, tx in zip(signatures, tx_results):
+                if not isinstance(tx, dict):
                     continue
 
-                pre_balances = tx["meta"].get("preBalances", [])
-                post_balances = tx["meta"].get("postBalances", [])
+                meta = tx.get("meta") or {}
+                pre_balances = meta.get("preBalances", [])
+                post_balances = meta.get("postBalances", [])
+                account_keys = (
+                    tx.get("transaction", {}).get("message", {}).get("accountKeys", [])
+                )
 
-                for before, after in zip(pre_balances, post_balances):
-                    if before - after >= threshold_lamports:
-                        large_transactions.append(sig["signature"])
-                        break
+                try:
+                    idx = account_keys.index(settings.treasury_wallet)
+                except ValueError:
+                    continue
+
+                if idx >= len(pre_balances) or idx >= len(post_balances):
+                    continue
+
+                before = pre_balances[idx]
+                after = post_balances[idx]
+
+                if abs(after - before) >= threshold_lamports:
+                    large_transactions.append(sig["signature"])
 
         return {
             "status": "success",
@@ -348,9 +367,9 @@ async def _monitor_whale_activity_async() -> Dict[str, Any]:
             "transactions": large_transactions,
         }
 
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error monitoring whale activity: {e}")
-        return {"status": "error", "message": str(e)}
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Error monitoring whale activity: {exc}")
+        raise
 
 
 # Helper functions
@@ -472,9 +491,8 @@ async def _validate_market_data_async():
     }
 
     try:
-        async with get_db_session() as db:
-            # Check for recent data
-            recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        async with get_db_session():
+            # TODO: add data-freshness checks once requirements are defined
 
             # Validation checks would go here
             # For now, return basic validation
