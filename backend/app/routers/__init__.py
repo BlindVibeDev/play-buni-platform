@@ -1,1 +1,1 @@
-# API route handlers 
+"""Route handlers for the Play Buni API."""

@@ -1,1 +1,1 @@
-# Business logic and external service integrations 
+"""Business logic and external service integrations."""
